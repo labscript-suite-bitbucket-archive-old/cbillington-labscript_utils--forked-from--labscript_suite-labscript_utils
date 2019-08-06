@@ -16,11 +16,12 @@ if PY2:
     str = unicode
 
 import sys
+from types import MethodType
 from socket import gethostbyname
 from distutils.version import LooseVersion
 import zmq
 
-from labscript_utils import check_version
+from labscript_utils import check_version, get_version
 check_version('zprocess', '2.15.0', '3.0.0')
 
 import zprocess
@@ -139,6 +140,18 @@ class ProcessTree(zprocess.ProcessTree):
         return cls._instance
 
 
+def _wrap_handler(handler):
+    """Wrap a ZMQServer.handler method to add common remote methods to all servers used by
+    labscript programs"""
+    def wrapped(self, data):
+        # A request to give the version of any module in the server's environment:
+        if isinstance(data, (list, tuple)) and data[0] == 'get_version':
+            return get_version(*data[1:])
+        else:
+            return handler(self, data)
+    return wrapped
+
+
 class ZMQServer(zprocess.ZMQServer):
     """A ZMQServer configured with security settings from labconfig"""
 
@@ -167,6 +180,10 @@ class ZMQServer(zprocess.ZMQServer):
         shared_secret = config['shared_secret']
         allow_insecure = config['allow_insecure']
 
+        if dtype == 'pyobj':
+            # Wrap the handler method to provide common remote methods:
+            self.handler = MethodType(_wrap_handler(self.handler.__func__), self)
+        
         zprocess.ZMQServer.__init__(
             self,
             port=port,

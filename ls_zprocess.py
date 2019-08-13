@@ -28,7 +28,6 @@ check_version('zprocess', '2.15.2', '3.0.0')
 import zprocess
 import zprocess.process_tree
 from zprocess.security import SecureContext
-from zprocess.utils import TimeoutError
 from labscript_utils.labconfig import LabConfig
 from labscript_utils import dedent
 import zprocess.zlog
@@ -478,3 +477,9 @@ class RPCClient(ZMQClient):
                 module_name=module_name, at_least=at_least, less_than=less_than
             )
         raise VersionException(msg)
+
+    def say_hello(self):
+        return self.request('hello')
+
+    def get_version(self, *args, **kwargs):
+        return self.get_version(*args, **kwargs)

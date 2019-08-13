@@ -359,15 +359,6 @@ def ensure_connected_to_zlog():
     _connected_to_zlog = True
 
 
-
-class InvalidRequest(ValueError):
-    """Should be raised by fallback() method of subclasses of RPCServer to indicate that
-    the request is not something the fallback method was designed to handle. This way
-    the calling code will know to raise an AttributeError saying there is no such method
-    rather than some less informative error from within the fallback handler"""
-    pass
-
-
 class RPCServer(ZMQServer):
     """A ZMQServer than handles requests in the form of methods with arguments, keyword
     arguments, and a list of required versions of modules to be passed to check_version
@@ -425,10 +416,7 @@ class RPCServer(ZMQServer):
     def fallback_handler(self, request_data):
         """Subclasses should implement this method to support requests that are not in
         the form of a method, arguments and keyword arguments, for backward
-        compatibility with older RPC protocols that still need to be supported. If the
-        type of request is not recognised, the method should raise InvalidRequest. If
-        the type of request is recognised as one of the backward-compatible requests,
-        but has some other problem, some other appropriate exception should be raised"""
+        compatibility with cleints speaking older RPC protocols."""
 
 
 class RPCClient(ZMQClient):

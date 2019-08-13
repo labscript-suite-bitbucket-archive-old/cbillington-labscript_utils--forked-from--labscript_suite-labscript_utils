@@ -16,17 +16,19 @@ if PY2:
     str = unicode
 
 import sys
-from types import MethodType
 from socket import gethostbyname
 from distutils.version import LooseVersion
+import traceback
+from inspect import getcallargs
 import zmq
 
-from labscript_utils import check_version, get_version
-check_version('zprocess', '2.15.0', '3.0.0')
+from labscript_utils import check_version, get_version, VersionException
+check_version('zprocess', '2.15.2', '3.0.0')
 
 import zprocess
 import zprocess.process_tree
 from zprocess.security import SecureContext
+from zprocess.utils import TimeoutError
 from labscript_utils.labconfig import LabConfig
 from labscript_utils import dedent
 import zprocess.zlog
@@ -140,18 +142,6 @@ class ProcessTree(zprocess.ProcessTree):
         return cls._instance
 
 
-def _wrap_handler(handler):
-    """Wrap a ZMQServer.handler method to add common remote methods to all servers used by
-    labscript programs"""
-    def wrapped(self, data):
-        # A request to give the version of any module in the server's environment:
-        if isinstance(data, (list, tuple)) and data[0] == 'get_version':
-            return get_version(*data[1:])
-        else:
-            return handler(self, data)
-    return wrapped
-
-
 class ZMQServer(zprocess.ZMQServer):
     """A ZMQServer configured with security settings from labconfig"""
 
@@ -180,10 +170,6 @@ class ZMQServer(zprocess.ZMQServer):
         shared_secret = config['shared_secret']
         allow_insecure = config['allow_insecure']
 
-        if dtype == 'pyobj':
-            # Wrap the handler method to provide common remote methods:
-            self.handler = MethodType(_wrap_handler(self.handler.__func__), self)
-        
         zprocess.ZMQServer.__init__(
             self,
             port=port,
@@ -372,3 +358,135 @@ def ensure_connected_to_zlog():
         client.ping()
     _connected_to_zlog = True
 
+
+
+class InvalidRequest(ValueError):
+    """Should be raised by fallback() method of subclasses of RPCServer to indicate that
+    the request is not something the fallback method was designed to handle. This way
+    the calling code will know to raise an AttributeError saying there is no such method
+    rather than some less informative error from within the fallback handler"""
+    pass
+
+
+class RPCServer(ZMQServer):
+    """A ZMQServer than handles requests in the form of methods with arguments, keyword
+    arguments, and a list of required versions of modules to be passed to check_version
+    on the server before the method call. Methods must be named `handle_<name>` where
+    <name> is the name of a method in the corresponding client class"""
+    server_name = None
+    def __init__(self, port=None, bind_address='tcp://0.0.0.0', timeout_interval=None):
+        ZMQServer.__init__(
+            self,
+            port=port,
+            bind_address=bind_address,
+            timeout_interval=timeout_interval,
+        )
+        if self.server_name is None:
+            msg = """Please set class attribute server_name to the name
+                of the program the server is running in"""
+            raise ValueError(dedent(msg))
+
+    def handle_get_version(self, *args, **kwargs):
+        return get_version(*args, **kwargs)
+
+    def handle_hello(self):
+        return 'hello'
+
+    def handler(self, request_data):
+        try:
+            try:
+                method_name, args, kwargs, request_metadata = request_data
+            except ValueError:
+                return self.fallback_handler(request_data)
+            required_versions = request_metadata.get('required_versions', [])
+            for v_args, v_kwargs in required_versions:
+                check_version(*v_args, **v_kwargs)
+            try:
+                f = getattr(self, 'handle_' + method_name)
+            except AttributeError:
+                raise AttributeError(
+                    ' %s server has no such method ' % self.server_name
+                    + repr(method_name)
+                )
+            return f(*args, **kwargs)
+        except Exception as e:
+            msg = traceback.format_exc()
+            msg = '%s server returned an exception:\n' % self.server_name + msg
+            e = e.__class__(msg)
+            # This extra attribute is how the client can tell the difference between a
+            # handled exception from this class, and an exception from an older
+            # ZMQServer that does not know how to handle its request. Since the
+            # old-style servers do not have versioning capabilities, this is the best we
+            # can do! The clients will treat any exceptions not tagged in this way as
+            # due to the server being too old and will raise a VersionException instead.
+            e.from_RPCServer = True
+            return e
+
+    def fallback_handler(self, request_data):
+        """Subclasses should implement this method to support requests that are not in
+        the form of a method, arguments and keyword arguments, for backward
+        compatibility with older RPC protocols that still need to be supported. If the
+        type of request is not recognised, the method should raise InvalidRequest. If
+        the type of request is recognised as one of the backward-compatible requests,
+        but has some other problem, some other appropriate exception should be raised"""
+
+
+class RPCClient(ZMQClient):
+    _required_versions = []
+    server_name = None
+
+    def __init__(self, host=None, port=None):
+        ZMQClient.__init__(self)
+        self.host = host
+        self.port = port
+        if not self._required_versions:
+            msg = """RPCClient subclass must call self.require_server_version() at
+                least once from its __init__ method specifying the minimum version of
+                the server program that uses an RPCServer instead of the older
+                ZMQServer"""
+            raise RuntimeError(dedent(msg))
+        if self.server_name is None:
+            msg = """Please set class attribute server_name to the name
+                of the program the server is running in"""
+            raise ValueError(dedent(msg))
+
+    def require_server_version(self, *args, **kwargs):
+        """Call this method from __init__ of a subclass for each required version of a
+        component on the server. All method calls will check that the server satisfies
+        these requirements. Call signature is the same as labscript_utils.check_version.
+        This method must be called at least once before calling RPCClient.__init__ from
+        a subclass, as at the very least the minimum version of the program containing
+        the RPCServer must be specified."""
+        self._required_versions.append((args, kwargs))
+
+    def request(self, method_name, *args, **kwargs):
+        request_metadata = {'required_versions': self._required_versions}
+        response = self.get(
+            self.port,
+            self.host,
+            data=[method_name, args, kwargs, request_metadata],
+            timeout=15,
+            raise_server_exceptions=False,
+        )
+
+        if not isinstance(response, Exception):
+            return response
+
+        if getattr(response, 'from_RPCServer', False):
+            # The error was from an RPCServer, so raise it
+            raise response
+        # The error was from an old-style ZMQServer not using the new RPC protocol.
+        # Raise an error telling the user to upgrade the server instead:
+        msg = """ {} server version not new enough to handle request. Please ensure the
+            server satisfies the following version requirements:"""
+        msg = dedent(msg).format(self.server_name)
+        for args, kwargs in self._required_versions:
+            call_values = getcallargs(check_version, *args, **kwargs)
+            module_name = call_values['module_name']
+            at_least = call_values['at_least']
+            less_than = call_values['less_than']
+            line = '\n    {at_least} <= {module_name} < {less_than}'
+            msg += line.format(
+                module_name=module_name, at_least=at_least, less_than=less_than
+            )
+        raise VersionException(msg)

@@ -117,6 +117,8 @@ def _get_literal_version(filename):
                             continue
 
 
+_version_cache = {}
+
 def get_version(import_name, project_name=None):
     """Try very hard to get the version of a package without importing it. First find
     where it would be imported from, without importing it. Then look for metadata in the
@@ -128,35 +130,41 @@ def get_version(import_name, project_name=None):
 
     Return NotFound if the package cannot be found, and NoVersionInfo if the version
     cannot be obtained in the above way, or if it was found but was None."""
-    if project_name is None:
-        project_name = import_name
-    if '.' in import_name:
-        msg = "Version checking of top-level packages only implemented"
-        raise NotImplementedError(msg)
-    # Find the path where the module lives:
     try:
-        import_path = _get_import_path(import_name)
-    except ImportError:
-        return NotFound
-    # Check if pkg_resources knows about this module:
-    version = _get_metadata_version(project_name, import_path)
-    if version is not None:
-        return version
-    # Check if it has a version literal defined in a __version__.py file:
-    version_dot_py = os.path.join(import_path, import_name, '__version__.py')
-    version = _get_literal_version(version_dot_py)
-    if version is not None:
-        return version
-    # check if it has a __version__ literal defined in its main module.
-    pkg = os.path.join(import_path, import_name)
-    if os.path.isdir(pkg):
-        module_file = os.path.join(pkg, '__init__.py')
-    else:
-        module_file = pkg + '.py'
-    version = _get_literal_version(module_file)
-    if version is not None:
-        return version
-    return NoVersionInfo
+        return _version_cache[import_name, project_name]
+    except KeyError:
+        if project_name is None:
+            project_name = import_name
+        if '.' in import_name:
+            msg = "Version checking of top-level packages only implemented"
+            raise NotImplementedError(msg)
+        # Find the path where the module lives:
+        try:
+            import_path = _get_import_path(import_name)
+        except ImportError:
+            return NotFound
+        # Check if pkg_resources knows about this module:
+        version = _get_metadata_version(project_name, import_path)
+        if version is not None:
+            _version_cache[import_name, project_name] = version
+            return version
+        # Check if it has a version literal defined in a __version__.py file:
+        version_dot_py = os.path.join(import_path, import_name, '__version__.py')
+        version = _get_literal_version(version_dot_py)
+        if version is not None:
+            _version_cache[import_name, project_name] = version
+            return version
+        # check if it has a __version__ literal defined in its main module.
+        pkg = os.path.join(import_path, import_name)
+        if os.path.isdir(pkg):
+            module_file = os.path.join(pkg, '__init__.py')
+        else:
+            module_file = pkg + '.py'
+        version = _get_literal_version(module_file)
+        if version is not None:
+            _version_cache[import_name, project_name] = version
+            return version
+        return NoVersionInfo
 
 
 def check_version(module_name, at_least, less_than, version=None, project_name=None):

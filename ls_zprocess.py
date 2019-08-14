@@ -358,6 +358,10 @@ def ensure_connected_to_zlog():
     _connected_to_zlog = True
 
 
+# A version number for the protocol itself
+RPC_PROTO_VERSION = '1.0.0'
+
+
 class RPCServer(ZMQServer):
     """A ZMQServer than handles requests in the form of methods with arguments, keyword
     arguments, and a list of required versions of modules to be passed to check_version
@@ -386,10 +390,14 @@ class RPCServer(ZMQServer):
         try:
             try:
                 method_name, args, kwargs, request_metadata = request_data
-            except ValueError:
+                method_name = str(method_name)
+                args = tuple(args)
+                kwargs = dict(kwargs)
+                request_metadata = dict(request_metadata)
+                required_server_versions = request_metadata['required_server_versions']
+            except (ValueError, TypeError, KeyError):
                 return self.fallback_handler(request_data)
-            required_versions = request_metadata.get('required_versions', [])
-            for v_args, v_kwargs in required_versions:
+            for v_args, v_kwargs in required_server_versions:
                 check_version(*v_args, **v_kwargs)
             try:
                 f = getattr(self, 'handle_' + method_name)
@@ -416,26 +424,33 @@ class RPCServer(ZMQServer):
         """Subclasses should implement this method to support requests that are not in
         the form of a method, arguments and keyword arguments, for backward
         compatibility with cleints speaking older RPC protocols."""
+        msg = "Request did not conform to RPC protocol %s format" % RPC_PROTO_VERSION
+        raise ValueError(msg)
 
 
 class RPCClient(ZMQClient):
-    _required_versions = []
+    _required_server_versions = None
+    _client_versions = None
     server_name = None
 
     def __init__(self, host=None, port=None):
         ZMQClient.__init__(self)
         self.host = host
         self.port = port
-        if not self._required_versions:
+        if self._required_server_versions is None:
             msg = """RPCClient subclass must call self.require_server_version() at
                 least once from its __init__ method specifying the minimum version of
-                the server program that uses an RPCServer instead of the older
-                ZMQServer"""
+                the server program required."""
+            raise RuntimeError(dedent(msg))
+        if self._client_versions is None:
+            msg = """RPCClient subclass must call self.declare_client_version() at least
+                once from its __init__ method specifying the version of the client
+                program or API."""
             raise RuntimeError(dedent(msg))
         if self.server_name is None:
-            msg = """Please set class attribute server_name to the name
-                of the program the server is running in"""
+            msg = """RPCClient subclass must set the class attribute server_name."""
             raise ValueError(dedent(msg))
+        self._client_versions.append(('_rpc_proto', RPC_PROTO_VERSION))
 
     def require_server_version(self, *args, **kwargs):
         """Call this method from __init__ of a subclass for each required version of a
@@ -444,10 +459,25 @@ class RPCClient(ZMQClient):
         This method must be called at least once before calling RPCClient.__init__ from
         a subclass, as at the very least the minimum version of the program containing
         the RPCServer must be specified."""
-        self._required_versions.append((args, kwargs))
+        if self._required_server_versions is None:
+            self._required_server_versions = []
+        self._required_server_versions.append((args, kwargs))
+
+    def declare_client_version(self, name, version):
+        """Call this method from the __init__ of  subclass to declare the version of a
+        component on the client. This will be communicated to the server and it may
+        change its behaviour depending on the client's versions. At the very least
+        this must be called once to declare the version of the client API itself."""
+        if self._client_versions is None:
+            self._client_versions = []
+        self._client_versions.append((name, version))
+
 
     def request(self, method_name, *args, **kwargs):
-        request_metadata = {'required_versions': self._required_versions}
+        request_metadata = {
+            'required_server_versions': self._required_server_versions,
+            'client_versions': self._client_versions,
+        }
         response = self.get(
             self.port,
             self.host,

@@ -379,6 +379,9 @@ class RPCServer(ZMQServer):
             msg = """Please set class attribute server_name to the name
                 of the program the server is running in"""
             raise ValueError(dedent(msg))
+        # This is set on a per-request basis, and methods may inspect it to determine
+        # the versions of components that the client has declared.
+        self.client_versions = None
 
     def handle_get_version(self, *args, **kwargs):
         return get_version(*args, **kwargs)
@@ -395,6 +398,7 @@ class RPCServer(ZMQServer):
                 kwargs = dict(kwargs)
                 request_metadata = dict(request_metadata)
                 required_server_versions = request_metadata['required_server_versions']
+                self.client_versions = request_metadata['client_versions']
             except (ValueError, TypeError, KeyError):
                 return self.fallback_handler(request_data)
             for v_args, v_kwargs in required_server_versions:
@@ -419,6 +423,8 @@ class RPCServer(ZMQServer):
             # due to the server being too old and will raise a VersionException instead.
             e.from_RPCServer = True
             return e
+        finally:
+            self.client_versions = None
 
     def fallback_handler(self, request_data):
         """Subclasses should implement this method to support requests that are not in

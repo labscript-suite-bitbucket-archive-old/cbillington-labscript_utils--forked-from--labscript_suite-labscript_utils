@@ -368,6 +368,8 @@ class RPCServer(ZMQServer):
     on the server before the method call. Methods must be named `handle_<name>` where
     <name> is the name of a method in the corresponding client class"""
     server_name = None
+    _required_client_versions = None
+    _server_versions = None
     def __init__(self, port=None, bind_address='tcp://0.0.0.0', timeout_interval=None):
         ZMQServer.__init__(
             self,
@@ -382,6 +384,25 @@ class RPCServer(ZMQServer):
         # This is set on a per-request basis, and methods may inspect it to determine
         # the versions of components that the client has declared.
         self.client_versions = None
+
+    def require_client_version(self, name, at_least, less_than=None):
+        """Call this method from __init__ of a subclass for each required version of a
+        component on the client. All method calls will check that the cleint satisfies
+        these requirements with the versions it declares it has."""
+        if self._required_client_versions is None:
+            self._required_client_versions = []
+        self._required_client_versions.append((name, at_least, less_than))
+
+    def declare_server_version(self, name, version):
+        """Call this method from the __init__ of  subclass to declare the version of a
+        component on the server. This will be checked against the required versions as
+        specified by the client with each remote call. Components that are top-level
+        python packages need not be declared with this method - their versions can be
+        checked automatically. Use this method to declare versions of things that are
+        not top-level packages, such as a protocol version."""
+        if self._server_versions is None:
+            self._server_versions = []
+        self._server_versions.append((name, version))
 
     def handle_get_version(self, *args, **kwargs):
         return get_version(*args, **kwargs)

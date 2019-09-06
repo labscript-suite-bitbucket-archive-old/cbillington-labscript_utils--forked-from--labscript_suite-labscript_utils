@@ -149,7 +149,7 @@ class ZMQServer(zprocess.ZMQServer):
         port=None,
         dtype='pyobj',
         pull_only=False,
-        bind_address='tcp://0.0.0.0',
+        bind_address='tcp://*',
         timeout_interval=None,
         **kwargs
     ):
@@ -370,7 +370,7 @@ class RPCServer(ZMQServer):
     server_name = None
     _required_client_versions = None
     _server_versions = None
-    def __init__(self, port=None, bind_address='tcp://0.0.0.0', timeout_interval=None):
+    def __init__(self, port=None, bind_address='tcp://*', timeout_interval=None):
         ZMQServer.__init__(
             self,
             port=port,
@@ -524,7 +524,7 @@ class RPCClient(ZMQClient):
         msg = """ {} server version not new enough to handle request. Please ensure the
             server satisfies the following version requirements:"""
         msg = dedent(msg).format(self.server_name)
-        for args, kwargs in self._required_versions:
+        for args, kwargs in self._required_server_versions:
             call_values = getcallargs(check_version, *args, **kwargs)
             module_name = call_values['module_name']
             at_least = call_values['at_least']

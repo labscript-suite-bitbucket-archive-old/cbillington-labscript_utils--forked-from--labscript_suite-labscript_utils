@@ -149,6 +149,8 @@ def _get_literal_version(filename):
                             continue
 
 
+_version_cache = {}
+
 def get_version(import_name, project_name=None):
     """Try very hard to get the version of a package without importing it. First find
     where it would be imported from, without importing it. Then look for metadata in the
@@ -161,6 +163,8 @@ def get_version(import_name, project_name=None):
     Return NotFound if the package cannot be found, and NoVersionInfo if the version
     cannot be obtained in the above way, or if it was found but was None."""
     _initialise()
+    if (import_name, project_name) in _version_cache:
+        return _version_cache[import_name, project_name]
     if project_name is None:
         project_name = import_name
     if '.' in import_name:
@@ -174,11 +178,13 @@ def get_version(import_name, project_name=None):
     # Check if pkg_resources knows about this module:
     version = _get_metadata_version(project_name, import_path)
     if version is not None:
+        _version_cache[import_name, project_name] = version
         return version
     # Check if it has a version literal defined in a __version__.py file:
     version_dot_py = os.path.join(import_path, import_name, '__version__.py')
     version = _get_literal_version(version_dot_py)
     if version is not None:
+        _version_cache[import_name, project_name] = version
         return version
     # check if it has a __version__ literal defined in its main module.
     pkg = os.path.join(import_path, import_name)
@@ -188,6 +194,7 @@ def get_version(import_name, project_name=None):
         module_file = pkg + '.py'
     version = _get_literal_version(module_file)
     if version is not None:
+        _version_cache[import_name, project_name] = version
         return version
     return NoVersionInfo
 

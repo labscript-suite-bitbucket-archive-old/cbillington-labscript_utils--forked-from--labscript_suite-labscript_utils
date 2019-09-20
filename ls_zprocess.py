@@ -18,10 +18,12 @@ if PY2:
 import sys
 from socket import gethostbyname
 from distutils.version import LooseVersion
+import traceback
+from inspect import getcallargs
 import zmq
 
-from labscript_utils import check_version
-check_version('zprocess', '2.15.0', '3.0.0')
+from labscript_utils import check_version, get_version, VersionException
+check_version('zprocess', '2.15.2', '3.0.0')
 
 import zprocess
 import zprocess.process_tree
@@ -147,7 +149,7 @@ class ZMQServer(zprocess.ZMQServer):
         port=None,
         dtype='pyobj',
         pull_only=False,
-        bind_address='tcp://0.0.0.0',
+        bind_address='tcp://*',
         timeout_interval=None,
         **kwargs
     ):
@@ -355,3 +357,186 @@ def ensure_connected_to_zlog():
         client.ping()
     _connected_to_zlog = True
 
+
+# A version number for the protocol itself
+RPC_PROTO_VERSION = '1.0.0'
+
+
+class RPCServer(ZMQServer):
+    """A ZMQServer than handles requests in the form of methods with arguments, keyword
+    arguments, and a list of required versions of modules to be passed to check_version
+    on the server before the method call. Methods must be named `handle_<name>` where
+    <name> is the name of a method in the corresponding client class"""
+    server_name = None
+    _required_client_versions = None
+    _server_versions = None
+    def __init__(self, port=None, bind_address='tcp://*', timeout_interval=None):
+        ZMQServer.__init__(
+            self,
+            port=port,
+            bind_address=bind_address,
+            timeout_interval=timeout_interval,
+        )
+        if self.server_name is None:
+            msg = """Please set class attribute server_name to the name
+                of the program the server is running in"""
+            raise ValueError(dedent(msg))
+        # This is set on a per-request basis, and methods may inspect it to determine
+        # the versions of components that the client has declared.
+        self.client_versions = None
+
+    def require_client_version(self, name, at_least, less_than=None):
+        """Call this method from __init__ of a subclass for each required version of a
+        component on the client. All method calls will check that the cleint satisfies
+        these requirements with the versions it declares it has."""
+        if self._required_client_versions is None:
+            self._required_client_versions = []
+        self._required_client_versions.append((name, at_least, less_than))
+
+    def declare_server_version(self, name, version):
+        """Call this method from the __init__ of  subclass to declare the version of a
+        component on the server. This will be checked against the required versions as
+        specified by the client with each remote call. Components that are top-level
+        python packages need not be declared with this method - their versions can be
+        checked automatically. Use this method to declare versions of things that are
+        not top-level packages, such as a protocol version."""
+        if self._server_versions is None:
+            self._server_versions = []
+        self._server_versions.append((name, version))
+
+    def handle_get_version(self, *args, **kwargs):
+        return get_version(*args, **kwargs)
+
+    def handle_hello(self):
+        return 'hello'
+
+    def handler(self, request_data):
+        try:
+            try:
+                method_name, args, kwargs, request_metadata = request_data
+                method_name = str(method_name)
+                args = tuple(args)
+                kwargs = dict(kwargs)
+                request_metadata = dict(request_metadata)
+                required_server_versions = request_metadata['required_server_versions']
+                self.client_versions = request_metadata['client_versions']
+            except (ValueError, TypeError, KeyError):
+                return self.fallback_handler(request_data)
+            for v_args, v_kwargs in required_server_versions:
+                check_version(*v_args, **v_kwargs)
+            try:
+                f = getattr(self, 'handle_' + method_name)
+            except AttributeError:
+                raise AttributeError(
+                    ' %s server has no such method ' % self.server_name
+                    + repr(method_name)
+                )
+            return f(*args, **kwargs)
+        except Exception as e:
+            msg = traceback.format_exc()
+            msg = '%s server returned an exception:\n' % self.server_name + msg
+            e = e.__class__(msg)
+            # This extra attribute is how the client can tell the difference between a
+            # handled exception from this class, and an exception from an older
+            # ZMQServer that does not know how to handle its request. Since the
+            # old-style servers do not have versioning capabilities, this is the best we
+            # can do! The clients will treat any exceptions not tagged in this way as
+            # due to the server being too old and will raise a VersionException instead.
+            e.from_RPCServer = True
+            return e
+        finally:
+            self.client_versions = None
+
+    def fallback_handler(self, request_data):
+        """Subclasses should implement this method to support requests that are not in
+        the form of a method, arguments and keyword arguments, for backward
+        compatibility with cleints speaking older RPC protocols."""
+        msg = "Request did not conform to RPC protocol %s format" % RPC_PROTO_VERSION
+        raise ValueError(msg)
+
+
+class RPCClient(ZMQClient):
+    _required_server_versions = None
+    _client_versions = None
+    server_name = None
+
+    def __init__(self, host=None, port=None):
+        ZMQClient.__init__(self)
+        self.host = host
+        self.port = port
+        if self._required_server_versions is None:
+            msg = """RPCClient subclass must call self.require_server_version() at
+                least once from its __init__ method specifying the minimum version of
+                the server program required."""
+            raise RuntimeError(dedent(msg))
+        if self._client_versions is None:
+            msg = """RPCClient subclass must call self.declare_client_version() at least
+                once from its __init__ method specifying the version of the client
+                program or API."""
+            raise RuntimeError(dedent(msg))
+        if self.server_name is None:
+            msg = """RPCClient subclass must set the class attribute server_name."""
+            raise ValueError(dedent(msg))
+        self._client_versions.append(('_rpc_proto', RPC_PROTO_VERSION))
+
+    def require_server_version(self, *args, **kwargs):
+        """Call this method from __init__ of a subclass for each required version of a
+        component on the server. All method calls will check that the server satisfies
+        these requirements. Call signature is the same as labscript_utils.check_version.
+        This method must be called at least once before calling RPCClient.__init__ from
+        a subclass, as at the very least the minimum version of the program containing
+        the RPCServer must be specified."""
+        if self._required_server_versions is None:
+            self._required_server_versions = []
+        self._required_server_versions.append((args, kwargs))
+
+    def declare_client_version(self, name, version):
+        """Call this method from the __init__ of  subclass to declare the version of a
+        component on the client. This will be communicated to the server and it may
+        change its behaviour depending on the client's versions. At the very least
+        this must be called once to declare the version of the client API itself."""
+        if self._client_versions is None:
+            self._client_versions = []
+        self._client_versions.append((name, version))
+
+
+    def request(self, method_name, *args, **kwargs):
+        request_metadata = {
+            'required_server_versions': self._required_server_versions,
+            'client_versions': self._client_versions,
+        }
+        response = self.get(
+            self.port,
+            self.host,
+            data=[method_name, args, kwargs, request_metadata],
+            timeout=15,
+            raise_server_exceptions=False,
+        )
+
+        if not isinstance(response, Exception):
+            return response
+
+        if getattr(response, 'from_RPCServer', False):
+            # The error was from an RPCServer, so raise it
+            raise response
+        # The error was from an old-style ZMQServer not using the new RPC protocol.
+        # Raise an error telling the user to upgrade the server instead:
+        msg = """ {} server version not new enough to handle request. Please ensure the
+            server satisfies the following version requirements:"""
+        msg = dedent(msg).format(self.server_name)
+        for args, kwargs in self._required_server_versions:
+            call_values = getcallargs(check_version, *args, **kwargs)
+            module_name = call_values['module_name']
+            at_least = call_values['at_least']
+            less_than = call_values['less_than']
+            line = '\n    {at_least} <= {module_name} < {less_than}'
+            msg += line.format(
+                module_name=module_name, at_least=at_least, less_than=less_than
+            )
+        raise VersionException(msg)
+
+    def say_hello(self):
+        return self.request('hello')
+
+    def get_version(self, *args, **kwargs):
+        return self.get_version(*args, **kwargs)

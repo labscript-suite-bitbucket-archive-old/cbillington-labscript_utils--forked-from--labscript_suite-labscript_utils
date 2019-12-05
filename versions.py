@@ -23,6 +23,8 @@ if PY2:
     str = unicode
     import imp
 
+from labscript_utils import labscript_suite_profile
+
 
 # Lazy import so that labscript applications' excepthook is present before we
 # raise errors about not having a new enough importlib_metadata.
@@ -36,24 +38,26 @@ def _initialise():
     # The following import looks pointless, but is required for its side effects. Finders
     # are added to sys.meta_path that we use:
     try:
-        # This will be in the standard library in Python 3.8:
+        # Standard library in Python 3.8+
         import importlib.metadata as importlib_metadata
     except ImportError:
-        # This is the backport of the Python 3.8 stdlib module,
+        # The backport of the Python 3.8 stdlib module,
         import importlib_metadata
 
-    # Check the version of the importlib_metatata package we have imported, so that we know
-    # we can actually use it to check versions. Trust importlib_metadata.__version__ for
-    # now, to avoid using importlib_metadata itself until we know it is new enough:
-    check_version(
-        'importlib_metadata', '0.17', '2.0', version=importlib_metadata.__version__
-    )
+        # Check the version of the importlib_metatata package we have imported, so that
+        # we know we can actually use it to check versions. Trust
+        # importlib_metadata.__version__ for now, to avoid using importlib_metadata
+        # itself until we know it is new enough:
+        check_version(
+            'importlib_metadata', '0.23', '2.0', version=importlib_metadata.__version__
+        )
 
-    # Now that we know we have a new enough version of importlib_metadata imported, confirm
-    # that result using importlib_metadata itself. This will detect broken installations
-    # (where the metadata does not agree with the imported package, or if the same package
-    # is installed multiple times to different paths) whereas the above check will not.
-    check_version('importlib_metadata', '0.17', '2.0')
+        # Now that we know we have a new enough version of importlib_metadata imported,
+        # confirm that result using importlib_metadata itself. This will detect broken
+        # installations (where the metadata does not agree with the imported package, or
+        # if the same package is installed multiple times to different paths) whereas
+        # the above check will not.
+        check_version('importlib_metadata', '0.23', '2.0')
 
 
 class NotFound(object):
@@ -78,9 +82,27 @@ not properly removed. You may want to uninstall the package, manually delete rem
 metadata files/folders, then reinstall the package.""".replace('\n', ' ')
 
 
-def _get_import_path(import_name):
+def _get_import_path(import_name, return_app_repo_subdir=True):
     """Get which entry in sys.path a module would be imported from, without importing
-    it."""
+    it. If return_app_repo_subdir=True, and the resulting path is the labscript suite
+    profile directory, then check if module is a directory containing a setup.py and a
+    subdirectory of the same name as the module. If so, this is one of our module shims
+    that allows a repository to be imported like a regular installed module. In this
+    case, return the repository directory instead of the labscript suite profile
+    directory,"""
+    if return_app_repo_subdir:
+        path = _get_import_path(import_name, return_app_repo_subdir=False)
+        if path != labscript_suite_profile:
+            return path
+        modpath = os.path.join(path, import_name)
+        if (
+            os.path.isdir(modpath)
+            and os.path.exists(os.path.join(modpath, 'setup.py'))
+            and os.path.isdir(os.path.join(modpath, import_name))
+        ):
+            # It's a shim:
+            return modpath
+        return path
     if PY2:
         _, location, _ = imp.find_module(import_name)
         return os.path.dirname(location)
@@ -106,15 +128,10 @@ def _get_metadata_version(project_name, import_path):
     
     for finder in sys.meta_path:
         if hasattr(finder, 'find_distributions'):
-            if LooseVersion(importlib_metadata.__version__) >= LooseVersion('0.21'):
-                context = importlib_metadata.DistributionFinder.Context(
-                    name=project_name, path=[import_path]
-                )
-                dists = finder.find_distributions(context)
-            else:
-                # TODO: once importlib_metadata >=0.21 is in anaconda repositories, depend
-                # on it and remove this backward compatibility:
-                dists = finder.find_distributions(name=project_name, path=[import_path])
+            context = importlib_metadata.DistributionFinder.Context(
+                name=project_name, path=[import_path]
+            )
+            dists = finder.find_distributions(context)
             dists = list(dists)
             if len(dists) > 1:
                 msg = ERR_BROKEN_INSTALL.format(package=project_name, path=import_path)

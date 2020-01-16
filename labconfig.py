@@ -16,17 +16,13 @@ import sys
 import os
 import socket
 import subprocess
+import errno
+import configparser
 
-from labscript_utils import PY2
-if PY2:
-    import ConfigParser as configparser
-else:
-    import configparser
-
-from labscript_utils import labscript_suite_install_dir
+from labscript_utils import labscript_suite_profile
 # Look for a 'labconfig' folder in the labscript install directory:
-if labscript_suite_install_dir is not None:
-    config_prefix = os.path.join(labscript_suite_install_dir, 'labconfig')
+if labscript_suite_profile is not None:
+    config_prefix = os.path.join(labscript_suite_profile, 'labconfig')
 else:
     # No labscript install directory found? Revert to system defaults
     if os.name == 'nt':
@@ -38,7 +34,7 @@ else:
 
 if not os.path.exists(config_prefix):
     message = (r"Couldn't find labconfig folder. Please ensure it exists. " +
-               r"If the labscript suite is installed, labconfig must be <labscript_suite_install_dir>/labconfig/. " +
+               r"If the labscript suite is installed, labconfig must be <labscript_suite_profile>/labconfig/. " +
                r"If the labscript suite is not installed, then C:\labconfig\ is checked on Windows, " +
                r" and $HOME/labconfig/ then /etc/labconfig/ checked on unix.")
     raise IOError(message)
@@ -51,7 +47,25 @@ else:
     hostname = socket.gethostname()
 default_config_path = os.path.join(config_prefix,'%s.ini'%hostname)
 
-class LabConfig(configparser.SafeConfigParser):
+
+def mkdir_p(path):
+    try:
+        os.makedirs(path)
+    except OSError as exc:
+        if exc.errno == errno.EEXIST and os.path.isdir(path):
+            pass
+        else:
+            raise
+
+class EnvInterpolation(configparser.BasicInterpolation):
+    """Interpolation which expands environment variables in values,
+    by post-filtering BasicInterpolation.before_get()"""
+
+    def before_get(self, *args):
+        value = super(EnvInterpolation, self).before_get(*args)
+        return os.path.expandvars(value)
+
+class LabConfig(configparser.ConfigParser):
     NoOptionError = configparser.NoOptionError
     NoSectionError = configparser.NoSectionError
 
@@ -67,9 +81,8 @@ class LabConfig(configparser.SafeConfigParser):
             for option in options:
                 self.file_format += "%s = <value>\n"%option
 
-        # If the folder doesn't exist, create it
-        if not os.path.exists(os.path.dirname(self.config_path)):
-            os.mkdir(os.path.dirname(self.config_path))
+        # Ensure the folder exists:
+        mkdir_p(os.path.dirname(self.config_path))
 
         # If the file doesn't exist, create it
         if not os.path.exists(self.config_path):
@@ -77,7 +90,7 @@ class LabConfig(configparser.SafeConfigParser):
                 f.write(self.file_format)
 
         # Load the config file
-        configparser.SafeConfigParser.__init__(self,defaults)
+        configparser.ConfigParser.__init__(self, defaults=defaults, interpolation=EnvInterpolation())
         self.read(config_path) #read all files in the config path if it is a list (self.config_path only contains one string)
 
         try:
@@ -95,23 +108,23 @@ class LabConfig(configparser.SafeConfigParser):
     def add_section(self,section):
         # Create the group if it doesn't exist
         if not section.lower() == 'default' and not self.has_section(section):
-            configparser.SafeConfigParser.add_section(self, section)
+            configparser.ConfigParser.add_section(self, section)
 
     # Overwrite the set method so that it adds the section if it doesn't exist,
     # and immediately saves the data to the file (to avoid data loss on program crash)
     def set(self, section, option, value):
         self.add_section(section)
-        configparser.SafeConfigParser.set(self,section,option,value)
+        configparser.ConfigParser.set(self,section,option,value)
         self.save()
 
     # Overwrite the remove section function so that it immediately saves the change to disk
     def remove_section(self,section):
-        configparser.SafeConfigParser.remove_section(self,section)
+        configparser.ConfigParser.remove_section(self,section)
         self.save()
 
     # Overwrite the remove option function so that it immediately saves the change to disk
     def remove_option(self,section,option):
-        configparser.SafeConfigParser.remove_option(self,section,option)
+        configparser.ConfigParser.remove_option(self,section,option)
         self.save()
 
     # Provide a convenience method to save the contents of the ConfigParser to disk
